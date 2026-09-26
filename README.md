@@ -32,5 +32,5 @@ SkillSwap is a full-stack, real-time peer-to-peer skill exchange platform. Conne
 
 ### 1. Clone or Download the repository
 ```bash
-git clone https://github.com/saikatpaul2820/skillswap-live.git
-cd skillswap-live
+[git clone https://github.com/saikatpaul2820/skillswap-live.git
+cd skillswap-live](https://github.com/saikatpaul2820/skillswap-live)
