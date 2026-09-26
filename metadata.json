@@ -1,0 +1,6 @@
+{
+  "name": "SkillSwap",
+  "description": "A peer-to-peer skill exchange platform to discover skill matches, connect, and learn together without monetary transactions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
