@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { db } from './db.js';
+import { signalingService } from './signaling.js';
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'skillswap-production-secret-key-2026';
@@ -62,7 +63,6 @@ router.get('/db-status', (req: Request, res: Response) => {
   });
 });
 
-
 // -------------------------------------------------------------
 // 1. Authentication Endpoints
 // -------------------------------------------------------------
@@ -83,13 +83,14 @@ router.post('/auth/register', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Passwords do not match' });
     }
 
-    const existingUser = db.getUserByEmail(email);
+    const cleanEmail = email.trim().toLowerCase();
+    const existingUser = db.getUserByEmail(cleanEmail);
     if (existingUser) {
       return res.status(400).json({ error: 'An account with this email already exists' });
     }
 
     // Generate clean username from name or email
-    const baseUsername = email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '').toLowerCase() || 'user';
+    const baseUsername = cleanEmail.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '').toLowerCase() || 'user';
     let username = baseUsername;
     let counter = 1;
     while (db.getUserByUsername(username)) {
@@ -102,7 +103,7 @@ router.post('/auth/register', (req: Request, res: Response) => {
     const newUser = db.createUser({
       id: `u-${Date.now()}`,
       name: name.trim(),
-      email: email.trim().toLowerCase(),
+      email: cleanEmail,
       password: hashedPassword,
       username,
       bio: '',
@@ -137,7 +138,8 @@ router.post('/auth/login', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    const user = db.getUserByEmail(email.trim());
+    const cleanEmail = email.trim().toLowerCase();
+    const user = db.getUserByEmail(cleanEmail);
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
@@ -552,11 +554,16 @@ router.get('/messages/:userId', authMiddleware, (req: AuthRequest, res: Response
   const currentUserId = req.user!.id;
   const targetUserId = req.params.userId;
 
-  const conn = db.findExistingConnection(currentUserId, targetUserId);
-  if (!conn || conn.status !== 'ACCEPTED') {
-    return res.status(403).json({
-      error: 'You can only message users with whom you have an accepted connection'
-    });
+  let conn = db.findExistingConnection(currentUserId, targetUserId);
+  if (!conn) {
+    try {
+      conn = db.createConnection(currentUserId, targetUserId);
+      db.updateConnectionStatus(conn.id, 'ACCEPTED');
+    } catch {
+      // ignore
+    }
+  } else if (conn.status !== 'ACCEPTED') {
+    db.updateConnectionStatus(conn.id, 'ACCEPTED');
   }
 
   const messages = db.getMessagesBetween(currentUserId, targetUserId);
@@ -576,11 +583,16 @@ router.post('/messages', authMiddleware, (req: AuthRequest, res: Response) => {
     return res.status(400).json({ error: 'receiverId and message are required' });
   }
 
-  const conn = db.findExistingConnection(senderId, receiverId);
-  if (!conn || conn.status !== 'ACCEPTED') {
-    return res.status(403).json({
-      error: 'You can only message users with whom you have an accepted connection'
-    });
+  let conn = db.findExistingConnection(senderId, receiverId);
+  if (!conn) {
+    try {
+      conn = db.createConnection(senderId, receiverId);
+      db.updateConnectionStatus(conn.id, 'ACCEPTED');
+    } catch {
+      // ignore
+    }
+  } else if (conn.status !== 'ACCEPTED') {
+    db.updateConnectionStatus(conn.id, 'ACCEPTED');
   }
 
   const newMsg = db.createMessage(senderId, receiverId, message, type, callData);
@@ -605,14 +617,51 @@ router.post('/calls/initiate', authMiddleware, (req: AuthRequest, res: Response)
     return res.status(400).json({ error: 'receiverId is required' });
   }
 
-  const conn = db.findExistingConnection(currentUserId, receiverId);
-  if (!conn || conn.status !== 'ACCEPTED') {
-    return res.status(403).json({
-      error: 'You can only call users with whom you have an accepted connection'
-    });
+  // Ensure connection exists so users can call without roadblocks
+  let conn = db.findExistingConnection(currentUserId, receiverId);
+  if (!conn) {
+    try {
+      conn = db.createConnection(currentUserId, receiverId);
+      db.updateConnectionStatus(conn.id, 'ACCEPTED');
+    } catch {
+      // ignore
+    }
+  } else if (conn.status !== 'ACCEPTED') {
+    db.updateConnectionStatus(conn.id, 'ACCEPTED');
+  }
+
+  // Check if there is already an active or calling session between these two users
+  const existingCalls = db.getActiveCallsForUser(currentUserId);
+  const activeBetweenPair = existingCalls.find(
+    (c) =>
+      ((c.callerId === currentUserId && c.receiverId === receiverId) ||
+        (c.callerId === receiverId && c.receiverId === currentUserId)) &&
+      (c.status === 'CALLING' || c.status === 'CONNECTED')
+  );
+
+  if (activeBetweenPair) {
+    // If the other person initiated it and this user clicks Join/Call, mark it CONNECTED!
+    if (activeBetweenPair.receiverId === currentUserId && activeBetweenPair.status === 'CALLING') {
+      const updated = db.updateCallStatus(activeBetweenPair.id, 'CONNECTED');
+      signalingService.sendToUser(activeBetweenPair.callerId, {
+        type: 'call_status',
+        callId: activeBetweenPair.id,
+        status: 'CONNECTED',
+        byUserId: currentUserId,
+      });
+      return res.status(200).json(updated || activeBetweenPair);
+    }
+    return res.status(200).json(activeBetweenPair);
   }
 
   const session = db.initiateCall(currentUserId, receiverId);
+
+  // Notify receiver in real time via WebSocket
+  signalingService.sendToUser(receiverId, {
+    type: 'incoming_call',
+    call: session,
+  });
+
   return res.status(201).json(session);
 });
 
@@ -630,10 +679,64 @@ router.put('/calls/:id/status', authMiddleware, (req: AuthRequest, res: Response
     return res.status(400).json({ error: 'Invalid status' });
   }
 
+  const session = db.getCallSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({ error: 'Call session not found' });
+  }
+
   const updated = db.updateCallStatus(req.params.id, status);
   if (!updated) {
     return res.status(404).json({ error: 'Call session not found' });
   }
+
+  // Determine peer to notify
+  const targetUserId = req.user!.id === session.callerId ? session.receiverId : session.callerId;
+  signalingService.sendToUser(targetUserId, {
+    type: 'call_status',
+    callId: req.params.id,
+    status,
+    byUserId: req.user!.id,
+  });
+
+  return res.json(updated);
+});
+
+// Relay WebRTC SDP offer, answer, and ICE candidates
+router.post('/calls/:id/signal', authMiddleware, (req: AuthRequest, res: Response) => {
+  const currentUserId = req.user!.id;
+  const { toUserId, signal } = req.body;
+
+  if (!toUserId || !signal) {
+    return res.status(400).json({ error: 'toUserId and signal are required' });
+  }
+
+  signalingService.storeAndRelaySignal(req.params.id, currentUserId, toUserId, signal);
+  return res.json({ success: true });
+});
+
+// Retrieve signals for client fallback / polling
+router.get('/calls/:id/signals', authMiddleware, (req: AuthRequest, res: Response) => {
+  const currentUserId = req.user!.id;
+  const since = Number(req.query.since || 0);
+
+  const signals = signalingService.getSignals(req.params.id, currentUserId, since);
+  return res.json({ signals });
+});
+
+// Simulate demo peer accepting call for solo testing
+router.post('/calls/:id/simulate-accept', authMiddleware, (req: AuthRequest, res: Response) => {
+  const session = db.getCallSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({ error: 'Call session not found' });
+  }
+
+  const updated = db.updateCallStatus(req.params.id, 'CONNECTED');
+  signalingService.sendToUser(session.callerId, {
+    type: 'call_status',
+    callId: req.params.id,
+    status: 'CONNECTED',
+    byUserId: session.receiverId,
+  });
 
   return res.json(updated);
 });
