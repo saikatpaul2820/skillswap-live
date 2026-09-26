@@ -1,42 +1,36 @@
-🔄 SkillSwap — Peer-to-Peer Skill Exchange Platform
-A modern full-stack web application that allows people to exchange skills without currency. Teach what you know, learn what you love! Built with a mutual compatibility matching engine, interactive chat, and integrated 1-to-1 live video calling.
+# SkillSwap 🚀
 
-✨ Features
-🎯 Smart Mutual Matching Engine
+SkillSwap is a full-stack, real-time peer-to-peer skill exchange platform. Connect with developers, designers, language learners, and mentors worldwide to trade knowledge through high-definition WebRTC video calls, live messaging, and interactive session scheduling.
 
-Calculates compatibility scores based on mutual skill swaps (e.g., You teach UI/UX Design & want Java ⇄ Peer teaches Java & wants UI/UX).
-Categorizes matches by mutual swaps, people who can teach you, or people seeking your skills.
-📹 1-to-1 Live Video Calling
+![SkillSwap Platform](https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=1200&q=80)
 
-Launch live video sessions directly from private chat conversations.
-Interactive call alerts, microphone toggle, camera toggle, flip camera, and session duration timers.
-Real-time call status signaling (CALLING, CONNECTED, ENDED).
-💬 Private Direct Messaging
+---
 
-Instant messaging between accepted connections.
-Call invite preview cards embedded directly in the message stream.
-🤝 Connection Management
+## ✨ Features
 
-Send, accept, or reject peer connection requests.
-Tabbed overview for incoming pending requests, sent requests, and active connections.
-🔍 Explore Skill Exchange Directory
+- 🎥 **Real-time WebRTC 1-on-1 Video & Audio**: HD video calling with multi-peer mesh signaling, screen sharing, camera/mic toggling, and in-call text chat.
+- 💬 **Instant Direct Messaging**: Real-time WebSocket messaging with instant typing indicators, unread notification counts, and message history.
+- 🤝 **Skill Exchange Marketplace**: Browse offered skills and requested skills, search by tags, proficiency levels, and location.
+- 📅 **Session Booking & Swap Proposals**: Propose skill swaps, accept/decline offers, and schedule calendar appointments.
+- ⭐ **Reviews & Rating System**: Rate past swap partners and build a credible community profile.
+- 🌐 **Persistent Cloud Database**: MongoDB Atlas integration with automatic fallback to JSON file persistence for local development.
+- 🔐 **Secure Authentication**: JWT token authentication with bcrypt password hashing and user profiles.
 
-Browse public skill exchange requests by topic, skill category, or delivery mode (Online, In-person, or Either).
-Post your own customized learning & teaching exchange proposals.
-👤 User Profiles & Skills Portfolio
+---
 
-Manage your bio, avatar, location, and teaching/learning skills catalog.
-🛠️ Tech Stack
-Frontend: React 19, TypeScript, Tailwind CSS, Lucide React Icons, Vite
-Backend: Node.js, Express, REST API
-Auth & Security: JWT (JSON Web Tokens), bcryptjs password hashing
-Persistence: JSON-backed file database engine with auto-seeding
-Real-Time & Media: WebRTC media streams, active call sessions, notification dispatchers
-🚀 Getting Started
-Prerequisites
-Node.js (version 18 or higher recommended)
-npm (bundled with Node.js)
-Installation
-Clone or download the repository:
+## 🛠️ Tech Stack
+
+- **Frontend**: React 18, TypeScript, Tailwind CSS, Lucide React icons, Vite
+- **Backend**: Node.js, Express, WebSocket (`ws`)
+- **Real-time**: WebRTC, STUN/TURN ICE signaling
+- **Database**: MongoDB Atlas (`mongodb` driver) with local JSON storage fallback
+- **Deployment**: Render Web Service, Docker ready
+
+---
+
+## 🚀 Quick Start (Local Development)
+
+### 1. Clone or Download the repository
+```bash
 git clone https://github.com/saikatpaul2820/skillswap-live.git
-cd SkillSwap
+cd skillswap-live
