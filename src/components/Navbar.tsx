@@ -16,6 +16,7 @@ import {
   LayoutDashboard
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from './Toast';
 import { api } from '../services/api';
 
 export interface NavbarProps {
@@ -47,6 +48,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     switchDemoUser,
     refreshUser,
   } = useAuth();
+  const { showToast } = useToast();
 
   const [showNotifications, setShowNotifications] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -71,14 +73,13 @@ export const Navbar: React.FC<NavbarProps> = ({
   }, []);
 
   const handleResetData = async () => {
-    if (!confirm('Reset all demo data to default test users and requests?')) return;
     setIsResetting(true);
     try {
       await api.resetDemoData();
       await refreshUser();
-      alert('Demo data successfully reset!');
+      showToast('Demo data successfully reset to initial seeds!', 'success');
     } catch (err: any) {
-      alert(err.message || 'Failed to reset data');
+      showToast(err.message || 'Failed to reset data', 'error');
     } finally {
       setIsResetting(false);
       setShowUserMenu(false);
@@ -438,3 +439,4 @@ export const Navbar: React.FC<NavbarProps> = ({
     </nav>
   );
 };
+
