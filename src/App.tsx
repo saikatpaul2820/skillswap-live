@@ -158,6 +158,10 @@ function AppContent() {
     }
   };
 
+  const handleEndCall = React.useCallback(() => {
+    setActiveCallSession(null);
+  }, []);
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 font-sans antialiased selection:bg-indigo-500 selection:text-white">
       {/* Top Navigation */}
@@ -336,7 +340,7 @@ function AppContent() {
         <VideoCallModal
           session={activeCallSession}
           currentUser={currentUser}
-          onEndCall={() => setActiveCallSession(null)}
+          onEndCall={handleEndCall}
         />
       )}
     </div>
