@@ -10,11 +10,13 @@ import {
   Clock,
   CheckCircle2,
   ExternalLink,
-  Edit3
+  Edit3,
+  Video
 } from 'lucide-react';
 import { User, UserSkill, SkillExchangeRequest, Connection } from '../types';
 import { api } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from './Toast';
 
 interface UserProfileModalProps {
   userId: string | null;
@@ -22,6 +24,7 @@ interface UserProfileModalProps {
   onClose: () => void;
   onOpenEditProfile?: () => void;
   onNavigateToChat?: (userId: string) => void;
+  onStartVideoCall?: (userId: string) => void;
 }
 
 export const UserProfileModal: React.FC<UserProfileModalProps> = ({
@@ -30,8 +33,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   onClose,
   onOpenEditProfile,
   onNavigateToChat,
+  onStartVideoCall,
 }) => {
   const { currentUser, isAuthenticated } = useAuth();
+  const { showToast } = useToast();
   const [profileData, setProfileData] = useState<{
     user: User;
     skills: UserSkill[];
@@ -97,8 +102,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       const conn = await api.createConnection(userId);
       setConnectionStatus(conn.status);
       setConnectionId(conn.id);
+      showToast('Connection request sent!', 'success');
     } catch (err: any) {
-      alert(err.message || 'Failed to send connection request');
+      showToast(err.message || 'Failed to send connection request', 'error');
     } finally {
       setIsSendingConn(false);
     }
@@ -169,36 +175,79 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       <span>Edit My Profile</span>
                     </button>
                   ) : connectionStatus === 'ACCEPTED' ? (
-                    <button
-                      onClick={() => {
-                        onClose();
-                        if (onNavigateToChat) onNavigateToChat(userId);
-                      }}
-                      className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm flex items-center justify-center gap-2 transition-colors"
-                    >
-                      <MessageSquare className="w-3.5 h-3.5" />
-                      <span>Message</span>
-                    </button>
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                      {onStartVideoCall && (
+                        <button
+                          onClick={() => {
+                            onClose();
+                            onStartVideoCall(userId);
+                          }}
+                          className="flex-1 sm:flex-initial px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl shadow-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                        >
+                          <Video className="w-3.5 h-3.5" />
+                          <span>Video Call</span>
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          onClose();
+                          if (onNavigateToChat) onNavigateToChat(userId);
+                        }}
+                        className="flex-1 sm:flex-initial px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm flex items-center justify-center gap-2 transition-colors"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>Message</span>
+                      </button>
+                    </div>
                   ) : connectionStatus === 'PENDING' ? (
-                    <div className="w-full sm:w-auto px-4 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold rounded-xl flex items-center justify-center gap-2">
-                      <Clock className="w-3.5 h-3.5" />
-                      <span>Connection Pending</span>
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                      {onStartVideoCall && (
+                        <button
+                          onClick={() => {
+                            onClose();
+                            onStartVideoCall(userId);
+                          }}
+                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl shadow-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                        >
+                          <Video className="w-3.5 h-3.5" />
+                          <span>Video Call</span>
+                        </button>
+                      )}
+                      <div className="px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold rounded-xl flex items-center justify-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5" />
+                        <span>Pending</span>
+                      </div>
                     </div>
                   ) : (
-                    <button
-                      onClick={handleSendConnection}
-                      disabled={isSendingConn || !isAuthenticated}
-                      className="w-full sm:w-auto px-5 py-2 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 disabled:opacity-50 text-white text-xs font-semibold rounded-xl shadow-sm flex items-center justify-center gap-2 transition-colors"
-                    >
-                      {isSendingConn ? (
-                        <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      ) : (
-                        <>
-                          <UserPlus className="w-3.5 h-3.5" />
-                          <span>Connect & Exchange</span>
-                        </>
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                      {onStartVideoCall && (
+                        <button
+                          onClick={() => {
+                            onClose();
+                            onStartVideoCall(userId);
+                          }}
+                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl shadow-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                          title="Instant 1-to-1 live video room"
+                        >
+                          <Video className="w-3.5 h-3.5" />
+                          <span>Video Call</span>
+                        </button>
                       )}
-                    </button>
+                      <button
+                        onClick={handleSendConnection}
+                        disabled={isSendingConn || !isAuthenticated}
+                        className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                      >
+                        {isSendingConn ? (
+                          <div className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <>
+                            <UserPlus className="w-3.5 h-3.5" />
+                            <span>Connect</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
