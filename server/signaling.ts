@@ -18,10 +18,23 @@ class SignalingService {
   private signalsBuffer: StoredSignal[] = [];
 
   public init(server: Server) {
-    this.wss = new WebSocketServer({ server, path: '/ws' });
+    this.wss = new WebSocketServer({ noServer: true });
+
+    server.on('upgrade', (request, socket, head) => {
+      try {
+        const url = new URL(request.url || '', `http://${request.headers.host || 'localhost'}`);
+        if (url.pathname === '/ws') {
+          this.wss!.handleUpgrade(request, socket, head, (ws) => {
+            this.wss!.emit('connection', ws, request);
+          });
+        }
+      } catch (err) {
+        console.warn('Error handling WebSocket upgrade:', err);
+      }
+    });
 
     this.wss.on('connection', (ws: WebSocket) => {
-      ws.on('message', (data: any) => {
+      ws.on('message', (data: string) => {
         try {
           const message = JSON.parse(data.toString());
           this.handleMessage(ws, message);
@@ -78,6 +91,15 @@ class SignalingService {
         this.userSockets.get(userId)!.add(ws);
 
         ws.send(JSON.stringify({ type: 'joined', userId, callId }));
+
+        // Notify other connected peer in this call that a participant joined
+        if (callId) {
+          for (const [otherWs, otherMeta] of this.socketUserMap.entries()) {
+            if (otherMeta.callId === callId && otherMeta.userId !== userId && otherWs.readyState === WebSocket.OPEN) {
+              otherWs.send(JSON.stringify({ type: 'peer_joined', userId, callId }));
+            }
+          }
+        }
         break;
       }
 
