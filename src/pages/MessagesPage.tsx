@@ -20,6 +20,7 @@ import {
   Paperclip
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../components/Toast';
 import { api } from '../services/api';
 import { Connection, Message, User } from '../types';
 
@@ -27,7 +28,7 @@ interface MessagesPageProps {
   initialUserId?: string | null;
   onExplore: () => void;
   onViewProfile: (userId: string) => void;
-  onStartVideoCall?: (partnerId: string) => void;
+  onStartVideoCall?: (partnerId: string, immediateConnect?: boolean) => void;
 }
 
 export const MessagesPage: React.FC<MessagesPageProps> = ({
@@ -37,6 +38,7 @@ export const MessagesPage: React.FC<MessagesPageProps> = ({
   onStartVideoCall,
 }) => {
   const { currentUser } = useAuth();
+  const { showToast } = useToast();
 
   const [connections, setConnections] = useState<Connection[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(initialUserId || null);
@@ -152,26 +154,27 @@ export const MessagesPage: React.FC<MessagesPageProps> = ({
       setMessages((prev) => [...prev, newMsg]);
       setTimeout(scrollToBottom, 50);
     } catch (err: any) {
-      alert(err.message || 'Failed to send message');
+      showToast(err.message || 'Failed to send message', 'error');
       if (!textToSend) setMessageText(text);
     } finally {
       setIsSending(false);
     }
   };
 
-  const handleStartCall = async () => {
+  const handleStartCall = async (immediate: boolean | React.MouseEvent = false) => {
+    const isImmediate = immediate === true;
     if (!selectedUserId || isStartingCall) return;
     setIsStartingCall(true);
     try {
       if (onStartVideoCall) {
-        onStartVideoCall(selectedUserId);
+        onStartVideoCall(selectedUserId, isImmediate);
       } else {
-        await api.initiateCall(selectedUserId);
+        await api.initiateCall(selectedUserId, isImmediate);
         const data = await api.getMessages(selectedUserId);
         setMessages(data.messages || []);
       }
     } catch (err: any) {
-      alert(err.message || 'Failed to initiate video call');
+      showToast(err.message || 'Failed to initiate video call', 'error');
     } finally {
       setIsStartingCall(false);
     }
@@ -419,8 +422,8 @@ export const MessagesPage: React.FC<MessagesPageProps> = ({
                                 {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                               </span>
                               <button
-                                onClick={handleStartCall}
-                                className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                                onClick={() => handleStartCall(true)}
+                                className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer hover:scale-102"
                               >
                                 <PhoneCall className="w-3 h-3" />
                                 <span>Join Room</span>
