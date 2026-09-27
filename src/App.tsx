@@ -1,21 +1,26 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { ToastProvider, useToast } from './components/Toast';
 import { Navbar } from './components/Navbar';
 import { AuthModal } from './components/AuthModal';
 import { ProfileSetupModal } from './components/ProfileSetupModal';
 import { CreateExchangeModal } from './components/CreateExchangeModal';
 import { UserProfileModal } from './components/UserProfileModal';
+import { VideoCallModal } from './components/VideoCallModal';
+import { IncomingCallBanner } from './components/IncomingCallBanner';
 import { LandingPage } from './pages/LandingPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ExplorePage } from './pages/ExplorePage';
 import { MatchesPage } from './pages/MatchesPage';
 import { ConnectionsPage } from './pages/ConnectionsPage';
 import { MessagesPage } from './pages/MessagesPage';
-import { SkillExchangeRequest } from './types';
+import { SkillExchangeRequest, CallSession } from './types';
+import { api } from './services/api';
 import { ArrowLeftRight, Heart, Sparkles } from 'lucide-react';
 
 function AppContent() {
   const { isAuthenticated, currentUser } = useAuth();
+  const { showToast } = useToast();
 
   // Navigation page state
   const [currentPage, setCurrentPage] = useState<'landing' | 'dashboard' | 'explore' | 'matches' | 'connections' | 'messages'>(
@@ -43,6 +48,48 @@ function AppContent() {
 
   // Messaging targeted user
   const [targetChatUserId, setTargetChatUserId] = useState<string | null>(null);
+
+  // 1-to-1 Video Call State
+  const [activeCallSession, setActiveCallSession] = useState<CallSession | null>(null);
+  const [incomingCall, setIncomingCall] = useState<CallSession | null>(null);
+
+  // Poll for incoming calls when user is authenticated
+  useEffect(() => {
+    if (!isAuthenticated || !currentUser) {
+      setIncomingCall(null);
+      return;
+    }
+
+    const interval = setInterval(async () => {
+      try {
+        const data = await api.getActiveCalls();
+        const calls = data.calls || [];
+
+        // Check if there is an incoming call where currentUser is receiver
+        const incoming = calls.find(
+          (c) => c.receiverId === currentUser.id && c.status === 'CALLING'
+        );
+
+        if (incoming && (!activeCallSession || activeCallSession.id !== incoming.id)) {
+          setIncomingCall(incoming);
+        } else if (!incoming && incomingCall) {
+          setIncomingCall(null);
+        }
+
+        // If current active call was ended by peer
+        if (activeCallSession) {
+          const currentInServer = calls.find((c) => c.id === activeCallSession.id);
+          if (!currentInServer || currentInServer.status === 'ENDED' || currentInServer.status === 'DECLINED') {
+            setActiveCallSession(null);
+          }
+        }
+      } catch {
+        // ignore polling error
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [isAuthenticated, currentUser, activeCallSession, incomingCall]);
 
   const handleOpenAuth = (mode: 'login' | 'register' = 'login') => {
     setAuthModalMode(mode);
@@ -75,6 +122,38 @@ function AppContent() {
     }
     setEditingExchange(existing || null);
     setIsCreateExchangeOpen(true);
+  };
+
+  const handleStartVideoCall = async (partnerId: string, immediateConnect = false) => {
+    try {
+      showToast('Starting 1-to-1 live video room...', 'info');
+      const session = await api.initiateCall(partnerId, immediateConnect);
+      setActiveCallSession(session);
+    } catch (err: any) {
+      showToast(err.message || 'Failed to start video call', 'error');
+    }
+  };
+
+  const handleAcceptIncomingCall = async () => {
+    if (!incomingCall) return;
+    try {
+      const updated = await api.updateCallStatus(incomingCall.id, 'CONNECTED');
+      setActiveCallSession(updated || incomingCall);
+      setIncomingCall(null);
+      showToast('Joined live video call room', 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Failed to join video call', 'error');
+    }
+  };
+
+  const handleDeclineIncomingCall = async () => {
+    if (!incomingCall) return;
+    try {
+      await api.updateCallStatus(incomingCall.id, 'DECLINED');
+      setIncomingCall(null);
+    } catch {
+      setIncomingCall(null);
+    }
   };
 
   return (
@@ -138,6 +217,7 @@ function AppContent() {
             onNavigateToChat={handleNavigateToChat}
             onViewProfile={handleViewProfile}
             onExplore={() => setCurrentPage('explore')}
+            onStartVideoCall={handleStartVideoCall}
           />
         )}
 
@@ -146,6 +226,7 @@ function AppContent() {
             initialUserId={targetChatUserId}
             onExplore={() => setCurrentPage('explore')}
             onViewProfile={handleViewProfile}
+            onStartVideoCall={handleStartVideoCall}
           />
         )}
       </main>
@@ -190,7 +271,7 @@ function AppContent() {
             <div className="text-xs text-slate-400 text-center md:text-right">
               <p>Exchange knowledge without monetary transactions.</p>
               <p className="mt-0.5 text-slate-400 text-[11px]">
-                Built with React, Express REST APIs, and modern peer matching.
+                Built with React, Express REST APIs, real-time messaging, and 1-to-1 video calls.
               </p>
             </div>
           </div>
@@ -223,7 +304,6 @@ function AppContent() {
         onCreated={(exchange) => {
           setIsCreateExchangeOpen(false);
           setEditingExchange(null);
-          // Navigate to explore to see the newly posted/updated exchange
           setCurrentPage('explore');
         }}
       />
@@ -237,14 +317,40 @@ function AppContent() {
         }}
         onOpenEditProfile={() => setIsProfileModalOpen(true)}
         onNavigateToChat={handleNavigateToChat}
+        onStartVideoCall={handleStartVideoCall}
       />
+
+      {/* Incoming Video Call Alert Banner */}
+      {incomingCall && (
+        <IncomingCallBanner
+          call={incomingCall}
+          onAccept={handleAcceptIncomingCall}
+          onDecline={handleDeclineIncomingCall}
+        />
+      )}
+
+      {/* 1-to-1 Live Video Call Modal */}
+      {activeCallSession && currentUser && (
+        <VideoCallModal
+          session={activeCallSession}
+          currentUser={currentUser}
+          onEndCall={() => setActiveCallSession(null)}
+        />
+      )}
     </div>
   );
 }
 
 export default function App() {
   return (
-    <AuthProvider>
+    <ToastProvider>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
+    </ToastProvider>
+  );
+}
+
       <AppContent />
     </AuthProvider>
   );
