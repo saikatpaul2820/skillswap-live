@@ -16,7 +16,7 @@ import { ConnectionsPage } from './pages/ConnectionsPage';
 import { MessagesPage } from './pages/MessagesPage';
 import { SkillExchangeRequest, CallSession } from './types';
 import { api } from './services/api';
-import { ArrowLeftRight } from 'lucide-react';
+import { ArrowLeftRight, Heart, Sparkles } from 'lucide-react';
 
 function AppContent() {
   const { isAuthenticated, currentUser } = useAuth();
@@ -27,12 +27,14 @@ function AppContent() {
     isAuthenticated ? 'dashboard' : 'landing'
   );
 
-  const hasInitializedPage = React.useRef(false);
+  const prevAuthRef = React.useRef(isAuthenticated);
   React.useEffect(() => {
-    if (!hasInitializedPage.current && isAuthenticated) {
-      hasInitializedPage.current = true;
+    if (!prevAuthRef.current && isAuthenticated) {
       setCurrentPage('dashboard');
+    } else if (prevAuthRef.current && !isAuthenticated) {
+      setCurrentPage('landing');
     }
+    prevAuthRef.current = isAuthenticated;
   }, [isAuthenticated]);
 
   // Modals state
@@ -162,20 +164,27 @@ function AppContent() {
       <Navbar
         currentPage={currentPage}
         onNavigate={handleNavigate}
-        onOpenAuth={handleOpenAuth}
+        onOpenAuth={() => handleOpenAuth('login')}
         onOpenRegister={() => handleOpenAuth('register')}
         onOpenEditProfile={() => setIsProfileModalOpen(true)}
         onOpenCreateExchange={() => handleOpenCreateExchange()}
         onViewProfile={handleViewProfile}
       />
 
-      {/* Main View Router */}
+      {/* Main Routed Page Content */}
       <main className="flex-1">
         {currentPage === 'landing' && (
           <LandingPage
-            onExplore={() => handleNavigate('explore')}
-            onRegister={() => handleOpenAuth('register')}
-            onOpenLogin={() => handleOpenAuth('login')}
+            onExplore={() => setCurrentPage('explore')}
+            onPostSkill={() => {
+              if (isAuthenticated) {
+                handleOpenCreateExchange();
+              } else {
+                handleOpenAuth('register');
+              }
+            }}
+            onJoin={() => handleOpenAuth('register')}
+            onViewProfile={handleViewProfile}
           />
         )}
 
@@ -184,14 +193,14 @@ function AppContent() {
             onOpenCreateExchange={() => handleOpenCreateExchange()}
             onOpenEditProfile={() => setIsProfileModalOpen(true)}
             onViewProfile={handleViewProfile}
-            onNavigateToMatches={() => handleNavigate('matches')}
-            onNavigateToExplore={() => handleNavigate('explore')}
+            onNavigateToMatches={() => setCurrentPage('matches')}
+            onNavigateToExplore={() => setCurrentPage('explore')}
           />
         )}
 
         {currentPage === 'explore' && (
           <ExplorePage
-            onOpenCreateExchange={handleOpenCreateExchange}
+            onOpenCreateExchange={(ex) => handleOpenCreateExchange(ex)}
             onViewProfile={handleViewProfile}
             onOpenAuthModal={() => handleOpenAuth('login')}
           />
@@ -209,7 +218,7 @@ function AppContent() {
           <ConnectionsPage
             onNavigateToChat={handleNavigateToChat}
             onViewProfile={handleViewProfile}
-            onExplore={() => handleNavigate('explore')}
+            onExplore={() => setCurrentPage('explore')}
             onStartVideoCall={handleStartVideoCall}
           />
         )}
@@ -217,7 +226,7 @@ function AppContent() {
         {currentPage === 'messages' && (
           <MessagesPage
             initialUserId={targetChatUserId}
-            onExplore={() => handleNavigate('explore')}
+            onExplore={() => setCurrentPage('explore')}
             onViewProfile={handleViewProfile}
             onStartVideoCall={handleStartVideoCall}
           />
@@ -250,53 +259,57 @@ function AppContent() {
               <button
                 onClick={() => {
                   if (isAuthenticated) {
-                    handleNavigate('messages');
+                    setIsProfileModalOpen(true);
                   } else {
                     handleOpenAuth('login');
                   }
                 }}
                 className="hover:text-indigo-600"
               >
-                1-to-1 Video Calls
+                Profile & Skills
               </button>
+            </div>
+
+            <div className="text-xs text-slate-400 text-center md:text-right">
+              <p>Exchange knowledge without monetary transactions.</p>
+              <p className="mt-0.5 text-slate-400 text-[11px]">
+                Built with React, Express REST APIs, real-time messaging, and 1-to-1 video calls.
+              </p>
             </div>
           </div>
         </div>
       </footer>
 
-      {/* Auth Modal (Login/Register) */}
+      {/* Modals */}
       <AuthModal
         isOpen={isAuthModalOpen}
-        initialMode={authModalMode}
         onClose={() => setIsAuthModalOpen(false)}
+        initialMode={authModalMode}
         onSuccess={() => {
           setIsAuthModalOpen(false);
           setCurrentPage('dashboard');
         }}
       />
 
-      {/* Profile Edit / Skill Tag Setup Modal */}
       <ProfileSetupModal
         isOpen={isProfileModalOpen}
         onClose={() => setIsProfileModalOpen(false)}
       />
 
-      {/* Create or Edit Exchange Request Modal */}
       <CreateExchangeModal
         isOpen={isCreateExchangeOpen}
-        existingExchange={editingExchange}
         onClose={() => {
           setIsCreateExchangeOpen(false);
           setEditingExchange(null);
         }}
-        onSuccess={() => {
+        existingExchange={editingExchange}
+        onCreated={(exchange) => {
           setIsCreateExchangeOpen(false);
           setEditingExchange(null);
           setCurrentPage('explore');
         }}
       />
 
-      {/* Inspect Peer Profile Modal */}
       <UserProfileModal
         userId={inspectUserId}
         isOpen={isUserProfileOpen}
