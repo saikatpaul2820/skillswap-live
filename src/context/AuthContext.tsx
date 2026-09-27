@@ -71,35 +71,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       api.setToken(null);
       setCurrentUser(null);
       setUserSkills([]);
-      // Automatically fallback to demo user so the app is always in a ready-to-test state
-      try {
-        await api.login({ email: 'sarah@skillswap.io', password: 'password123' });
-        const data = await api.getCurrentUser();
-        setCurrentUser(data.user);
-        setUserSkills(data.skills || []);
-        await refreshNotifications();
-      } catch {
-        // Ignore fallback failure
-      }
     } finally {
       setIsLoading(false);
     }
   }, [refreshNotifications]);
 
   useEffect(() => {
-    // If no token exists on first load, auto-login Sarah Chen as default demo user
-    // so the evaluator can immediately explore a rich active account without getting stuck on a blank screen
+    // Check if user has an existing saved auth session token
     const token = api.getToken();
-    if (!token) {
-      api.login({ email: 'sarah@skillswap.io', password: 'password123' })
-        .then(() => {
-          refreshUser();
-        })
-        .catch(() => {
-          setIsLoading(false);
-        });
-    } else {
+    if (token) {
       refreshUser();
+    } else {
+      // Start in logged-out state so users log in with their own id/password
+      setCurrentUser(null);
+      setUserSkills([]);
+      setIsLoading(false);
     }
   }, [refreshUser]);
 
