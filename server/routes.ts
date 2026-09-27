@@ -611,7 +611,7 @@ router.get('/calls/active', authMiddleware, (req: AuthRequest, res: Response) =>
 
 router.post('/calls/initiate', authMiddleware, (req: AuthRequest, res: Response) => {
   const currentUserId = req.user!.id;
-  const { receiverId } = req.body;
+  const { receiverId, connectImmediately } = req.body;
 
   if (!receiverId) {
     return res.status(400).json({ error: 'receiverId is required' });
@@ -640,8 +640,8 @@ router.post('/calls/initiate', authMiddleware, (req: AuthRequest, res: Response)
   );
 
   if (activeBetweenPair) {
-    // If the other person initiated it and this user clicks Join/Call, mark it CONNECTED!
-    if (activeBetweenPair.receiverId === currentUserId && activeBetweenPair.status === 'CALLING') {
+    // If either side or caller requested immediate connect, or receiver joins
+    if (connectImmediately || activeBetweenPair.receiverId === currentUserId) {
       const updated = db.updateCallStatus(activeBetweenPair.id, 'CONNECTED');
       signalingService.sendToUser(activeBetweenPair.callerId, {
         type: 'call_status',
@@ -655,6 +655,11 @@ router.post('/calls/initiate', authMiddleware, (req: AuthRequest, res: Response)
   }
 
   const session = db.initiateCall(currentUserId, receiverId);
+
+  if (connectImmediately) {
+    db.updateCallStatus(session.id, 'CONNECTED');
+    session.status = 'CONNECTED';
+  }
 
   // Notify receiver in real time via WebSocket
   signalingService.sendToUser(receiverId, {
