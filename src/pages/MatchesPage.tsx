@@ -12,6 +12,7 @@ import {
   HelpCircle
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../components/Toast';
 import { api } from '../services/api';
 import { MatchRecommendation } from '../types';
 
@@ -27,6 +28,7 @@ export const MatchesPage: React.FC<MatchesPageProps> = ({
   onOpenEditProfile,
 }) => {
   const { currentUser, userSkills } = useAuth();
+  const { showToast } = useToast();
   const [matches, setMatches] = useState<MatchRecommendation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [connectingUserId, setConnectingUserId] = useState<string | null>(null);
@@ -56,8 +58,9 @@ export const MatchesPage: React.FC<MatchesPageProps> = ({
       setMatches(prev =>
         (Array.isArray(prev) ? prev : []).map(m => (m.user.id === userId ? { ...m, connectionStatus: 'PENDING' } : m))
       );
+      showToast('Connection request sent!', 'success');
     } catch (err: any) {
-      alert(err.message || 'Failed to send connection request');
+      showToast(err.message || 'Failed to send connection request', 'error');
     } finally {
       setConnectingUserId(null);
     }
@@ -315,3 +318,4 @@ export const MatchesPage: React.FC<MatchesPageProps> = ({
     </div>
   );
 };
+
