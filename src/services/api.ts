@@ -249,10 +249,10 @@ class ApiService {
     return this.request<{ calls: CallSession[] }>('/calls/active');
   }
 
-  async initiateCall(receiverId: string) {
+  async initiateCall(receiverId: string, connectImmediately?: boolean) {
     return this.request<CallSession>('/calls/initiate', {
       method: 'POST',
-      body: JSON.stringify({ receiverId }),
+      body: JSON.stringify({ receiverId, connectImmediately: !!connectImmediately }),
     });
   }
 
