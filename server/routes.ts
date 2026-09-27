@@ -135,13 +135,13 @@ router.post('/auth/login', (req: Request, res: Response) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
+      return res.status(400).json({ error: 'Email or Username and password are required' });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-    const user = db.getUserByEmail(cleanEmail);
+    const cleanIdentifier = email.trim().toLowerCase();
+    const user = db.getUserByEmail(cleanIdentifier) || db.getUserByUsername(cleanIdentifier);
     if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+      return res.status(401).json({ error: 'Invalid Email/Username or password' });
     }
 
     const isMatch = bcrypt.compareSync(password, user.password);
