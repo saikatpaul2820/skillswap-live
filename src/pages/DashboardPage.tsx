@@ -15,6 +15,7 @@ import {
   Edit3
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../components/Toast';
 import { api } from '../services/api';
 import { MatchRecommendation, SkillExchangeRequest } from '../types';
 
@@ -34,6 +35,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   onNavigateToExplore,
 }) => {
   const { currentUser, userSkills } = useAuth();
+  const { showToast } = useToast();
   const [matches, setMatches] = useState<MatchRecommendation[]>([]);
   const [recentExchanges, setRecentExchanges] = useState<SkillExchangeRequest[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -77,8 +79,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
       setMatches(prev =>
         (Array.isArray(prev) ? prev : []).map(m => (m.user.id === userId ? { ...m, connectionStatus: 'PENDING' } : m))
       );
+      showToast('Connection request sent!', 'success');
     } catch (err: any) {
-      alert(err.message || 'Failed to send connection request');
+      showToast(err.message || 'Failed to send connection request', 'error');
     } finally {
       setConnectingUserId(null);
     }
