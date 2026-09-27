@@ -137,6 +137,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   // Audio & Video refs
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const simulatedPeerCanvasRef = useRef<HTMLCanvasElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const remoteMediaStreamRef = useRef<MediaStream | null>(null);
@@ -149,9 +150,27 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   const localAudioContextRef = useRef<AudioContext | null>(null);
   const localVolumeRafRef = useRef<number | null>(null);
   const isMakingOfferRef = useRef<boolean>(false);
+  const signalQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastHandledOfferSdpRef = useRef<string>('');
+  const lastHandledAnswerSdpRef = useRef<string>('');
+
+  const isAudioMutedRef = useRef(isAudioMuted);
+  useEffect(() => {
+    isAudioMutedRef.current = isAudioMuted;
+  }, [isAudioMuted]);
+
+  const onEndCallRef = useRef(onEndCall);
+  useEffect(() => {
+    onEndCallRef.current = onEndCall;
+  }, [onEndCall]);
+
+  const handleSignalRef = useRef<(signal: any) => void>(() => {});
+  const createAndSendOfferRef = useRef<() => void>(() => {});
 
   // Helper to ensure audio and video tracks are mapped to deterministic transceivers without altering m-line ordering
   const attachTracksToConnection = useCallback((pc: RTCPeerConnection, stream: MediaStream) => {
+    if (!pc || pc.signalingState === 'closed') return;
+
     const audioTrack = stream.getAudioTracks()[0] || null;
     const videoTrack = stream.getVideoTracks()[0] || null;
 
@@ -266,19 +285,38 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         }
       }
 
-      // Attach stream to remote video element
+      // Attach stream to remote video element if not already assigned
       if (remoteVideoRef.current && remoteMediaStreamRef.current) {
-        remoteVideoRef.current.srcObject = remoteMediaStreamRef.current;
+        if (remoteVideoRef.current.srcObject !== remoteMediaStreamRef.current) {
+          remoteVideoRef.current.srcObject = remoteMediaStreamRef.current;
+        }
         // CRITICAL FOR AUDIO: Unmute remote video so voice is heard!
         remoteVideoRef.current.muted = false;
         remoteVideoRef.current.volume = 1.0;
 
-        remoteVideoRef.current.play().then(() => {
-          setIsAudioAutoplayBlocked(false);
-        }).catch((err) => {
-          console.warn('[WebRTC] Autoplay with audio was blocked by browser:', err);
-          setIsAudioAutoplayBlocked(true);
-        });
+        const playPromise = remoteVideoRef.current.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              setIsAudioAutoplayBlocked(false);
+            })
+            .catch((err) => {
+              if (err.name !== 'AbortError') {
+                console.warn('[WebRTC] Autoplay with audio was blocked by browser:', err);
+                setIsAudioAutoplayBlocked(true);
+              }
+            });
+        }
+      }
+
+      // Also attach to dedicated remote audio element for guaranteed sound
+      if (remoteAudioRef.current && remoteMediaStreamRef.current) {
+        if (remoteAudioRef.current.srcObject !== remoteMediaStreamRef.current) {
+          remoteAudioRef.current.srcObject = remoteMediaStreamRef.current;
+        }
+        remoteAudioRef.current.muted = false;
+        remoteAudioRef.current.volume = 1.0;
+        remoteAudioRef.current.play().catch(() => {});
       }
 
       setHasRemoteStream(true);
@@ -358,11 +396,12 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     }
   }, [initPeerConnection, sendSignal, attachTracksToConnection]);
 
-  // 4. Handle incoming signals (SDP Offer, Answer, ICE Candidates)
-  const handleSignal = useCallback(
+  // 4. Handle incoming signals (SDP Offer, Answer, ICE Candidates) with strict queue serialization
+  const processSignal = useCallback(
     async (signal: any) => {
       if (!signal || !signal.type) return;
       const pc = peerConnectionRef.current || initPeerConnection();
+      if (pc.signalingState === 'closed') return;
 
       // Ensure local tracks are attached before answering
       if (cameraStreamRef.current) {
@@ -371,6 +410,15 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
       try {
         if (signal.type === 'offer') {
+          const offerSdp = signal.sdp?.sdp || (typeof signal.sdp === 'string' ? signal.sdp : JSON.stringify(signal.sdp));
+          if (offerSdp && lastHandledOfferSdpRef.current === offerSdp) {
+            console.log('[WebRTC] Duplicate SDP offer skipped');
+            return;
+          }
+          if (offerSdp) {
+            lastHandledOfferSdpRef.current = offerSdp;
+          }
+
           console.log('[WebRTC] Processing incoming SDP offer from peer, state:', pc.signalingState);
 
           const isCollision = isMakingOfferRef.current || pc.signalingState !== 'stable';
@@ -390,6 +438,11 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             }
           }
 
+          if (pc.signalingState !== 'stable') {
+            console.log(`[WebRTC] Cannot set remote offer in state '${pc.signalingState}', skipping`);
+            return;
+          }
+
           await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
 
           // Flush queued candidates
@@ -398,16 +451,27 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           }
           candidateQueueRef.current = [];
 
-          // Create answer
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
+          // Only create and set answer if in have-remote-offer state
+          if ((pc.signalingState as string) === 'have-remote-offer') {
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
 
-          sendSignal({
-            type: 'answer',
-            sdp: pc.localDescription || answer,
-          });
-          console.log('[WebRTC] SDP answer sent to caller');
+            sendSignal({
+              type: 'answer',
+              sdp: pc.localDescription || answer,
+            });
+            console.log('[WebRTC] SDP answer sent to caller');
+          }
         } else if (signal.type === 'answer') {
+          const answerSdp = signal.sdp?.sdp || (typeof signal.sdp === 'string' ? signal.sdp : JSON.stringify(signal.sdp));
+          if (answerSdp && lastHandledAnswerSdpRef.current === answerSdp) {
+            console.log('[WebRTC] Duplicate SDP answer skipped');
+            return;
+          }
+          if (answerSdp) {
+            lastHandledAnswerSdpRef.current = answerSdp;
+          }
+
           console.log('[WebRTC] Processing incoming SDP answer from peer, current state:', pc.signalingState);
           if (pc.signalingState === 'have-local-offer') {
             await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
@@ -432,6 +496,27 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     },
     [initPeerConnection, sendSignal, isCaller, attachTracksToConnection]
   );
+
+  const handleSignal = useCallback(
+    (signal: any) => {
+      signalQueueRef.current = signalQueueRef.current
+        .then(async () => {
+          await processSignal(signal);
+        })
+        .catch((err) => {
+          console.warn('[WebRTC] Signal queue execution error:', err);
+        });
+    },
+    [processSignal]
+  );
+
+  useEffect(() => {
+    handleSignalRef.current = handleSignal;
+  }, [handleSignal]);
+
+  useEffect(() => {
+    createAndSendOfferRef.current = createAndSendOffer;
+  }, [createAndSendOffer]);
 
   // 5. Setup local media: Prompts browser for BOTH Camera AND Microphone
   const setupLocalMedia = useCallback(async () => {
@@ -515,7 +600,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   sum += dataArray[i];
                 }
                 const avg = sum / dataArray.length;
-                setIsLocalSpeaking(avg > 18 && !isAudioMuted);
+                setIsLocalSpeaking(avg > 18 && !isAudioMutedRef.current);
                 localVolumeRafRef.current = requestAnimationFrame(checkVolume);
               };
               checkVolume();
@@ -530,7 +615,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       setUseVirtualCam(true);
       setMediaError('Camera/Mic permission was denied or blocked in browser settings.');
     }
-  }, [isAudioMuted, attachTracksToConnection]);
+  }, [attachTracksToConnection]);
 
   // 6. Connect Call Handler
   const handleConnectNow = useCallback(async () => {
@@ -540,7 +625,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     // If caller, initiate WebRTC offer immediately
     if (isCaller) {
       setTimeout(() => {
-        createAndSendOffer();
+        createAndSendOfferRef.current();
       }, 300);
     }
 
@@ -549,7 +634,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     } catch {
       // ignore
     }
-  }, [isCaller, createAndSendOffer, session.id]);
+  }, [isCaller, session.id]);
 
   // 7. Auto-answer countdown for solo evaluators
   useEffect(() => {
@@ -574,14 +659,14 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     if (callStatus === 'CONNECTED' && isCaller && !hasRemoteStream) {
       const timer = setTimeout(() => {
         console.log('[WebRTC] Status is CONNECTED, caller creating offer');
-        createAndSendOffer();
+        createAndSendOfferRef.current();
       }, 500);
 
       return () => clearTimeout(timer);
     }
-  }, [callStatus, isCaller, hasRemoteStream, createAndSendOffer]);
+  }, [callStatus, isCaller, hasRemoteStream]);
 
-  // 9. WebSocket signaling setup
+  // 9. WebSocket signaling setup (Stable: stays connected throughout call without reconnect loops)
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -613,18 +698,18 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'signal' && data.signal) {
-            handleSignal(data.signal);
+            handleSignalRef.current(data.signal);
           } else if (data.type === 'peer_joined') {
             console.log('[Signaling] Peer joined the room, triggering WebRTC handshake');
             setConnectionState('Peer in room • Handshaking...');
             if (isCaller) {
-              createAndSendOffer();
+              createAndSendOfferRef.current();
             }
           } else if (data.type === 'call_status') {
             if (data.status === 'CONNECTED') {
               setCallStatus('CONNECTED');
             } else if (data.status === 'ENDED' || data.status === 'DECLINED') {
-              onEndCall();
+              onEndCallRef.current();
             }
           } else if (data.type === 'reaction') {
             triggerReaction(data.emoji, false);
@@ -644,7 +729,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         wsRef.current.close();
       }
     };
-  }, [currentUser.id, session.id, isCaller, createAndSendOffer, handleSignal, onEndCall]);
+  }, [currentUser.id, session.id, isCaller]);
 
   // 10. REST polling fallback for signals & call status
   useEffect(() => {
@@ -655,7 +740,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         for (const s of signals) {
           if (s.timestamp > lastSignalTimeRef.current) {
             lastSignalTimeRef.current = s.timestamp;
-            handleSignal(s.signal);
+            handleSignalRef.current(s.signal);
           }
         }
 
@@ -664,16 +749,16 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           if (updated.status === 'CONNECTED' && callStatus === 'CALLING') {
             setCallStatus('CONNECTED');
           } else if (updated.status === 'ENDED' || updated.status === 'DECLINED') {
-            onEndCall();
+            onEndCallRef.current();
           }
         }
       } catch {
         // ignore
       }
-    }, 1500);
+    }, 2000);
 
     return () => clearInterval(interval);
-  }, [session.id, callStatus, handleSignal, onEndCall]);
+  }, [session.id, callStatus]);
 
   // 11. Call Duration Timer
   useEffect(() => {
@@ -990,6 +1075,13 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         setIsAudioAutoplayBlocked(false);
       }).catch(() => {});
     }
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.muted = false;
+      remoteAudioRef.current.volume = 1.0;
+      remoteAudioRef.current.play().then(() => {
+        setIsAudioAutoplayBlocked(false);
+      }).catch(() => {});
+    }
   };
 
   // Whiteboard drawing
@@ -1250,6 +1342,8 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   playsInline
                   className={`w-full h-full object-cover ${hasRemoteStream ? 'block' : 'hidden'}`}
                 />
+                {/* Real Remote Audio Element for guaranteed clear sound playback */}
+                <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
 
                 {/* Simulated Peer Canvas (Only shown when waiting for real peer stream) */}
                 <canvas
