@@ -6,8 +6,8 @@ import {
   VideoOff,
   PhoneOff,
   Monitor,
-  Maximize2,
-  Minimize2,
+  Volume2,
+  VolumeX,
   Sparkles,
   ShieldCheck,
   Code2,
@@ -80,18 +80,18 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isVideoMuted, setIsVideoMuted] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [partnerScreenSharing, setPartnerScreenSharing] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
   const [activeTab, setActiveTab] = useState<'video' | 'code' | 'whiteboard' | 'notes'>('video');
   const [hasRemoteStream, setHasRemoteStream] = useState(false);
-  const [isRemoteSpeaking, setIsRemoteSpeaking] = useState(true);
+  const [isRemoteSpeaking, setIsRemoteSpeaking] = useState(false);
   const [isLocalSpeaking, setIsLocalSpeaking] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [useVirtualCam, setUseVirtualCam] = useState(false);
   const [isSimulatingPeer, setIsSimulatingPeer] = useState(false);
-  const [connectionState, setConnectionState] = useState<string>('Connected (HD P2P)');
+  const [connectionState, setConnectionState] = useState<string>('Connecting...');
   const [autoAnswerTimer, setAutoAnswerTimer] = useState<number>(3);
   const [autoAnswerActive, setAutoAnswerActive] = useState<boolean>(true);
+  const [isAudioAutoplayBlocked, setIsAudioAutoplayBlocked] = useState(false);
 
   // Floating reactions
   const [reactions, setReactions] = useState<FloatingReaction[]>([]);
@@ -139,16 +139,69 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const simulatedPeerCanvasRef = useRef<HTMLCanvasElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
+  const remoteMediaStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const candidateQueueRef = useRef<RTCIceCandidateInit[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const lastSignalTimeRef = useRef<number>(0);
   const animFrameRef = useRef<number | null>(null);
+  const localAudioContextRef = useRef<AudioContext | null>(null);
+  const localVolumeRafRef = useRef<number | null>(null);
+  const isMakingOfferRef = useRef<boolean>(false);
+
+  // Helper to ensure audio and video tracks are mapped to deterministic transceivers without altering m-line ordering
+  const attachTracksToConnection = useCallback((pc: RTCPeerConnection, stream: MediaStream) => {
+    const audioTrack = stream.getAudioTracks()[0] || null;
+    const videoTrack = stream.getVideoTracks()[0] || null;
+
+    const transceivers = pc.getTransceivers();
+    let audioTransceiver = transceivers.find(
+      (t) => t.receiver.track.kind === 'audio' || t.sender.track?.kind === 'audio'
+    );
+    let videoTransceiver = transceivers.find(
+      (t) => t.receiver.track.kind === 'video' || t.sender.track?.kind === 'video'
+    );
+
+    // If transceivers do not exist yet, create them in strict deterministic order
+    if (!audioTransceiver) {
+      try {
+        audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
+      } catch (err) {
+        console.warn('[WebRTC] addTransceiver audio warning:', err);
+      }
+    }
+    if (!videoTransceiver) {
+      try {
+        videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
+      } catch (err) {
+        console.warn('[WebRTC] addTransceiver video warning:', err);
+      }
+    }
+
+    if (audioTransceiver && audioTransceiver.sender && audioTrack) {
+      if (audioTransceiver.sender.track?.id !== audioTrack.id) {
+        console.log(`[WebRTC] Attaching/replacing audio track: ${audioTrack.id}`);
+        audioTransceiver.sender.replaceTrack(audioTrack).catch((err) => {
+          console.warn('[WebRTC] Error replacing audio track:', err);
+        });
+      }
+    }
+
+    if (videoTransceiver && videoTransceiver.sender && videoTrack) {
+      if (videoTransceiver.sender.track?.id !== videoTrack.id) {
+        console.log(`[WebRTC] Attaching/replacing video track: ${videoTrack.id}`);
+        videoTransceiver.sender.replaceTrack(videoTrack).catch((err) => {
+          console.warn('[WebRTC] Error replacing video track:', err);
+        });
+      }
+    }
+  }, []);
 
   // 1. Send signal via WebSocket and REST fallback
   const sendSignal = useCallback(
     async (signal: any) => {
+      console.log(`[Signaling] Sending signal type: ${signal.type} to ${partnerId}`);
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
@@ -172,32 +225,68 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   const initPeerConnection = useCallback(() => {
     if (peerConnectionRef.current) return peerConnectionRef.current;
 
+    console.log('[WebRTC] Creating new RTCPeerConnection with STUN servers');
     const pc = new RTCPeerConnection(RTC_CONFIG);
     peerConnectionRef.current = pc;
 
-    if (cameraStreamRef.current) {
-      cameraStreamRef.current.getTracks().forEach((track) => {
-        pc.addTrack(track, cameraStreamRef.current!);
-      });
+    // Strict Deterministic Transceivers:
+    // Transceiver 0 = audio (direction: sendrecv)
+    // Transceiver 1 = video (direction: sendrecv)
+    // This locks SDP m-line 0 to audio and m-line 1 to video permanently, preventing m-line mismatch errors on renegotiation.
+    try {
+      pc.addTransceiver('audio', { direction: 'sendrecv' });
+      pc.addTransceiver('video', { direction: 'sendrecv' });
+    } catch (err) {
+      console.warn('[WebRTC] Transceiver initialization warning:', err);
     }
 
+    // Attach local tracks to pre-allocated transceivers if stream is already available
+    if (cameraStreamRef.current) {
+      attachTracksToConnection(pc, cameraStreamRef.current);
+    }
+
+    // Handle remote tracks (audio + video)
     pc.ontrack = (event) => {
-      let stream: MediaStream | null = null;
-      if (event.streams && event.streams[0]) {
-        stream = event.streams[0];
-      } else {
-        stream = new MediaStream([event.track]);
+      console.log('[WebRTC] Received remote track:', event.track.kind, event.streams);
+
+      if (!remoteMediaStreamRef.current) {
+        remoteMediaStreamRef.current = new MediaStream();
       }
 
-      if (remoteVideoRef.current && stream) {
-        remoteVideoRef.current.srcObject = stream;
-        remoteVideoRef.current.muted = true; // muted to prevent browser autoplay block
-        remoteVideoRef.current.play().catch(() => {});
+      // If stream provided, take its tracks; otherwise add track
+      if (event.streams && event.streams[0]) {
+        event.streams[0].getTracks().forEach((t) => {
+          if (!remoteMediaStreamRef.current!.getTracks().some((existing) => existing.id === t.id)) {
+            remoteMediaStreamRef.current!.addTrack(t);
+          }
+        });
+      } else {
+        if (!remoteMediaStreamRef.current.getTracks().some((t) => t.id === event.track.id)) {
+          remoteMediaStreamRef.current.addTrack(event.track);
+        }
       }
+
+      // Attach stream to remote video element
+      if (remoteVideoRef.current && remoteMediaStreamRef.current) {
+        remoteVideoRef.current.srcObject = remoteMediaStreamRef.current;
+        // CRITICAL FOR AUDIO: Unmute remote video so voice is heard!
+        remoteVideoRef.current.muted = false;
+        remoteVideoRef.current.volume = 1.0;
+
+        remoteVideoRef.current.play().then(() => {
+          setIsAudioAutoplayBlocked(false);
+        }).catch((err) => {
+          console.warn('[WebRTC] Autoplay with audio was blocked by browser:', err);
+          setIsAudioAutoplayBlocked(true);
+        });
+      }
+
       setHasRemoteStream(true);
+      setIsSimulatingPeer(false); // Stop simulation canvas when real remote video arrives
       setConnectionState('Connected (WebRTC HD)');
     };
 
+    // Handle ICE candidates
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         sendSignal({
@@ -208,94 +297,184 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     };
 
     pc.onconnectionstatechange = () => {
+      console.log('[WebRTC] Connection state changed:', pc.connectionState);
       if (pc.connectionState === 'connected') {
         setConnectionState('Connected (WebRTC HD)');
         setHasRemoteStream(true);
+        setIsSimulatingPeer(false);
       } else if (pc.connectionState === 'connecting') {
         setConnectionState('Connecting P2P...');
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        setConnectionState('Reconnecting...');
       }
     };
 
     return pc;
-  }, [sendSignal]);
+  }, [sendSignal, attachTracksToConnection]);
 
-  // 3. Handle incoming signals
+  // 3. Create and send WebRTC Offer (Initiated by Caller)
+  const createAndSendOffer = useCallback(async () => {
+    const pc = peerConnectionRef.current || initPeerConnection();
+
+    // Guard: Prevent concurrent offer generation or invalid offer creation
+    if (isMakingOfferRef.current) {
+      console.log('[WebRTC] Offer generation already in progress, skipping duplicate');
+      return;
+    }
+    if (pc.signalingState !== 'stable') {
+      console.log(`[WebRTC] Signaling state is '${pc.signalingState}' (not 'stable'), skipping duplicate offer creation`);
+      return;
+    }
+
+    try {
+      isMakingOfferRef.current = true;
+
+      // Attach local tracks to pre-allocated transceivers
+      if (cameraStreamRef.current) {
+        attachTracksToConnection(pc, cameraStreamRef.current);
+      }
+
+      console.log('[WebRTC] Creating SDP offer for audio & video');
+      // No legacy offerToReceiveAudio / offerToReceiveVideo: transceivers are already sendrecv!
+      const offer = await pc.createOffer();
+
+      // Guard: Ensure signaling state didn't change while waiting for createOffer
+      if (pc.signalingState !== 'stable') {
+        console.log(`[WebRTC] Signaling state changed to '${pc.signalingState}' during createOffer, aborting setLocalDescription`);
+        return;
+      }
+
+      await pc.setLocalDescription(offer);
+
+      sendSignal({
+        type: 'offer',
+        sdp: pc.localDescription || offer,
+      });
+      console.log('[WebRTC] SDP offer sent to peer');
+    } catch (err) {
+      console.error('[WebRTC] Error creating offer:', err);
+    } finally {
+      isMakingOfferRef.current = false;
+    }
+  }, [initPeerConnection, sendSignal, attachTracksToConnection]);
+
+  // 4. Handle incoming signals (SDP Offer, Answer, ICE Candidates)
   const handleSignal = useCallback(
     async (signal: any) => {
+      if (!signal || !signal.type) return;
       const pc = peerConnectionRef.current || initPeerConnection();
 
+      // Ensure local tracks are attached before answering
       if (cameraStreamRef.current) {
-        const senders = pc.getSenders();
-        cameraStreamRef.current.getTracks().forEach((track) => {
-          if (!senders.some((s) => s.track?.id === track.id)) {
-            pc.addTrack(track, cameraStreamRef.current!);
-          }
-        });
+        attachTracksToConnection(pc, cameraStreamRef.current);
       }
 
       try {
         if (signal.type === 'offer') {
+          console.log('[WebRTC] Processing incoming SDP offer from peer, state:', pc.signalingState);
+
+          const isCollision = isMakingOfferRef.current || pc.signalingState !== 'stable';
+          if (isCollision) {
+            console.log('[WebRTC] Signaling glare detected, handling offer collision');
+            if (isCaller) {
+              console.log('[WebRTC] Caller ignoring conflicting offer from callee');
+              return;
+            } else {
+              if (pc.signalingState === 'have-local-offer') {
+                try {
+                  await pc.setLocalDescription({ type: 'rollback' });
+                } catch (e) {
+                  console.warn('[WebRTC] Rollback notice:', e);
+                }
+              }
+            }
+          }
+
           await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+
+          // Flush queued candidates
           for (const cand of candidateQueueRef.current) {
             await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
           }
           candidateQueueRef.current = [];
 
+          // Create answer
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
 
           sendSignal({
             type: 'answer',
-            sdp: answer,
+            sdp: pc.localDescription || answer,
           });
+          console.log('[WebRTC] SDP answer sent to caller');
         } else if (signal.type === 'answer') {
-          if (pc.signalingState !== 'stable') {
+          console.log('[WebRTC] Processing incoming SDP answer from peer, current state:', pc.signalingState);
+          if (pc.signalingState === 'have-local-offer') {
             await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+
             for (const cand of candidateQueueRef.current) {
               await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
             }
             candidateQueueRef.current = [];
+          } else {
+            console.log('[WebRTC] Skipping answer because signalingState is:', pc.signalingState);
           }
         } else if (signal.type === 'candidate' && signal.candidate) {
-          if (pc.remoteDescription) {
+          if (pc.remoteDescription && pc.remoteDescription.type) {
             await pc.addIceCandidate(new RTCIceCandidate(signal.candidate)).catch(() => {});
           } else {
             candidateQueueRef.current.push(signal.candidate);
           }
         }
       } catch (err) {
-        console.warn('Signaling error handled gracefully:', err);
+        console.warn('[WebRTC] Error handling signal:', err);
       }
     },
-    [initPeerConnection, sendSignal]
+    [initPeerConnection, sendSignal, isCaller, attachTracksToConnection]
   );
 
-  // 4. Setup local camera media or graceful Virtual Camera fallback
+  // 5. Setup local media: Prompts browser for BOTH Camera AND Microphone
   const setupLocalMedia = useCallback(async () => {
     setMediaError(null);
     try {
       let stream: MediaStream | null = null;
+
+      // 1. Always request BOTH Video AND Audio simultaneously
       try {
+        console.log('[Media] Requesting Camera and Microphone permissions...');
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
-          audio: true,
+          video: {
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
+            facingMode: 'user',
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
         });
-      } catch (errBoth: any) {
-        // Fallback to video only
+        console.log('[Media] Got HD stream with video & audio tracks:', stream.getTracks().map((t) => t.kind));
+      } catch (errHigh: any) {
+        console.warn('[Media] HD constraints failed, requesting standard video+audio:', errHigh);
         try {
           stream = await navigator.mediaDevices.getUserMedia({
             video: true,
-            audio: false,
+            audio: true,
           });
-        } catch (errVideo: any) {
-          // Fallback to audio only
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: false,
-              audio: true,
-            });
-          } catch {
-            throw errBoth;
+          console.log('[Media] Got standard stream with video & audio:', stream.getTracks().map((t) => t.kind));
+        } catch (errBasic: any) {
+          console.warn('[Media] Basic video+audio failed, checking available devices:', errBasic);
+          const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+          const hasCam = devices.some((d) => d.kind === 'videoinput');
+          const hasMic = devices.some((d) => d.kind === 'audioinput');
+
+          if (hasCam && !hasMic) {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          } else if (!hasCam && hasMic) {
+            stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+          } else {
+            throw errBasic;
           }
         }
       }
@@ -303,43 +482,76 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       if (stream) {
         cameraStreamRef.current = stream;
         setUseVirtualCam(false);
+
+        // Local video element should ALWAYS be muted to prevent local echo
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
+          localVideoRef.current.muted = true;
           localVideoRef.current.play().catch(() => {});
         }
 
-        // Attach tracks to WebRTC peer connection if active
+        // Attach tracks to WebRTC peer connection transceivers
         if (peerConnectionRef.current) {
-          const senders = peerConnectionRef.current.getSenders();
-          stream.getTracks().forEach((track) => {
-            if (!senders.some((s) => s.track?.id === track.id)) {
-              peerConnectionRef.current?.addTrack(track, stream!);
+          attachTracksToConnection(peerConnectionRef.current, stream);
+        }
+
+        // Audio volume meter (soundwave / speaking indicator)
+        if (stream.getAudioTracks().length > 0) {
+          try {
+            const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+            if (AudioCtx) {
+              const audioCtx = new AudioCtx();
+              localAudioContextRef.current = audioCtx;
+              const source = audioCtx.createMediaStreamSource(stream);
+              const analyser = audioCtx.createAnalyser();
+              analyser.fftSize = 64;
+              source.connect(analyser);
+
+              const dataArray = new Uint8Array(analyser.frequencyBinCount);
+              const checkVolume = () => {
+                analyser.getByteFrequencyData(dataArray);
+                let sum = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                  sum += dataArray[i];
+                }
+                const avg = sum / dataArray.length;
+                setIsLocalSpeaking(avg > 18 && !isAudioMuted);
+                localVolumeRafRef.current = requestAnimationFrame(checkVolume);
+              };
+              checkVolume();
             }
-          });
+          } catch {
+            // Audio meter is optional enhancement
+          }
         }
       }
-    } catch {
-      // Gracefully switch to virtual camera avatar so user is never blocked
+    } catch (err: any) {
+      console.warn('[Media] Camera/Mic access denied or blocked:', err);
       setUseVirtualCam(true);
-      setMediaError('Camera permission blocked in browser/iframe — Virtual Camera active.');
+      setMediaError('Camera/Mic permission was denied or blocked in browser settings.');
     }
-  }, []);
+  }, [isAudioMuted, attachTracksToConnection]);
 
-  // 5. Connect Call (Transitions to CONNECTED and starts stream)
+  // 6. Connect Call Handler
   const handleConnectNow = useCallback(async () => {
     setAutoAnswerActive(false);
     setCallStatus('CONNECTED');
-    setIsSimulatingPeer(true);
-    setConnectionState('Connected (HD)');
+
+    // If caller, initiate WebRTC offer immediately
+    if (isCaller) {
+      setTimeout(() => {
+        createAndSendOffer();
+      }, 300);
+    }
 
     try {
       await api.simulateAcceptCall(session.id);
     } catch {
       // ignore
     }
-  }, [session.id]);
+  }, [isCaller, createAndSendOffer, session.id]);
 
-  // 6. Auto-answer countdown for solo evaluators
+  // 7. Auto-answer countdown for solo evaluators
   useEffect(() => {
     if (callStatus !== 'CALLING' || !autoAnswerActive) return;
 
@@ -357,7 +569,19 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     return () => clearInterval(timer);
   }, [callStatus, autoAnswerActive, handleConnectNow]);
 
-  // 7. WebSocket signaling setup
+  // 8. Trigger WebRTC offer whenever call transitions to CONNECTED
+  useEffect(() => {
+    if (callStatus === 'CONNECTED' && isCaller && !hasRemoteStream) {
+      const timer = setTimeout(() => {
+        console.log('[WebRTC] Status is CONNECTED, caller creating offer');
+        createAndSendOffer();
+      }, 500);
+
+      return () => clearTimeout(timer);
+    }
+  }, [callStatus, isCaller, hasRemoteStream, createAndSendOffer]);
+
+  // 9. WebSocket signaling setup
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -367,6 +591,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       wsRef.current = ws;
 
       ws.onopen = () => {
+        console.log('[Signaling] WebSocket connected on /ws');
         ws.send(
           JSON.stringify({
             type: 'join',
@@ -376,11 +601,25 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         );
       };
 
+      ws.onerror = (err) => {
+        console.warn('[Signaling] WebSocket event error:', err);
+      };
+
+      ws.onclose = () => {
+        console.log('[Signaling] WebSocket connection closed');
+      };
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'signal' && data.signal) {
             handleSignal(data.signal);
+          } else if (data.type === 'peer_joined') {
+            console.log('[Signaling] Peer joined the room, triggering WebRTC handshake');
+            setConnectionState('Peer in room • Handshaking...');
+            if (isCaller) {
+              createAndSendOffer();
+            }
           } else if (data.type === 'call_status') {
             if (data.status === 'CONNECTED') {
               setCallStatus('CONNECTED');
@@ -405,9 +644,9 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         wsRef.current.close();
       }
     };
-  }, [currentUser.id, session.id, handleSignal, onEndCall]);
+  }, [currentUser.id, session.id, isCaller, createAndSendOffer, handleSignal, onEndCall]);
 
-  // 8. REST polling fallback for signals & call status
+  // 10. REST polling fallback for signals & call status
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
@@ -431,12 +670,12 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       } catch {
         // ignore
       }
-    }, 2000);
+    }, 1500);
 
     return () => clearInterval(interval);
   }, [session.id, callStatus, handleSignal, onEndCall]);
 
-  // 9. Call Duration Timer
+  // 11. Call Duration Timer
   useEffect(() => {
     let timer: any;
     if (callStatus === 'CONNECTED') {
@@ -447,7 +686,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     return () => clearInterval(timer);
   }, [callStatus]);
 
-  // 10. Mount effect: initialize media
+  // 12. Mount effect: initialize media
   useEffect(() => {
     setupLocalMedia();
 
@@ -464,16 +703,21 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       if (animFrameRef.current) {
         cancelAnimationFrame(animFrameRef.current);
       }
+      if (localVolumeRafRef.current) {
+        cancelAnimationFrame(localVolumeRafRef.current);
+      }
+      if (localAudioContextRef.current) {
+        localAudioContextRef.current.close().catch(() => {});
+      }
     };
   }, [setupLocalMedia]);
 
-  // 11. Render simulated interactive peer canvas stream
+  // 13. Simulated canvas stream for solo testing only (when real remote stream not present)
   useEffect(() => {
-    if (callStatus !== 'CONNECTED') return;
+    if (callStatus !== 'CONNECTED' || hasRemoteStream) return;
 
     const canvas = simulatedPeerCanvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
@@ -481,14 +725,12 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     let isCancelled = false;
 
     const render = () => {
-      if (isCancelled) return;
+      if (isCancelled || hasRemoteStream) return;
       frame++;
 
-      // Canvas dimensions
       const width = canvas.width;
       const height = canvas.height;
 
-      // Dark background gradient
       const bgGrad = ctx.createLinearGradient(0, 0, width, height);
       bgGrad.addColorStop(0, '#0f172a');
       bgGrad.addColorStop(0.5, '#1e1b4b');
@@ -496,43 +738,16 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       ctx.fillStyle = bgGrad;
       ctx.fillRect(0, 0, width, height);
 
-      // Subtle dynamic audio background grid
-      ctx.strokeStyle = 'rgba(99, 102, 241, 0.08)';
-      ctx.lineWidth = 1;
-      const gridSize = 40;
-      for (let x = 0; x < width; x += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, height);
-        ctx.stroke();
-      }
-      for (let y = 0; y < height; y += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y);
-        ctx.stroke();
-      }
-
-      // Audio Equalizer Waveform Rings around avatar
       const centerX = width / 2;
       const centerY = height / 2 - 35;
       const pulse = Math.sin(frame * 0.08) * 12;
 
-      // Outer wave ring
       ctx.strokeStyle = 'rgba(99, 102, 241, 0.35)';
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.arc(centerX, centerY, 82 + pulse, 0, Math.PI * 2);
       ctx.stroke();
 
-      // Middle wave ring
-      ctx.strokeStyle = 'rgba(129, 140, 248, 0.6)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, 72 + pulse * 0.6, 0, Math.PI * 2);
-      ctx.stroke();
-
-      // Avatar circle base
       ctx.save();
       ctx.beginPath();
       ctx.arc(centerX, centerY, 62, 0, Math.PI * 2);
@@ -543,14 +758,12 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       ctx.stroke();
       ctx.restore();
 
-      // Partner Initial Icon inside avatar
       ctx.fillStyle = '#ffffff';
       ctx.font = 'bold 36px system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(partnerName.charAt(0).toUpperCase(), centerX, centerY);
 
-      // Partner Name & Live Badge
       ctx.font = 'bold 20px system-ui, sans-serif';
       ctx.fillStyle = '#f8fafc';
       ctx.fillText(partnerName, centerX, centerY + 85);
@@ -558,28 +771,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       ctx.font = '500 13px system-ui, sans-serif';
       ctx.fillStyle = '#a5b4fc';
       ctx.fillText('Live Interactive Skill Session', centerX, centerY + 110);
-
-      // Speaking Equalizer Bars
-      const numBars = 9;
-      const barWidth = 6;
-      const barSpacing = 12;
-      const startX = centerX - ((numBars - 1) * barSpacing) / 2;
-
-      for (let i = 0; i < numBars; i++) {
-        const heightMultiplier = Math.abs(Math.sin((frame + i * 25) * 0.12));
-        const barH = 8 + heightMultiplier * 28;
-        const x = startX + i * barSpacing - barWidth / 2;
-        const y = centerY + 140 - barH / 2;
-
-        const barGrad = ctx.createLinearGradient(0, y, 0, y + barH);
-        barGrad.addColorStop(0, '#818cf8');
-        barGrad.addColorStop(1, '#4f46e5');
-        ctx.fillStyle = barGrad;
-
-        ctx.beginPath();
-        ctx.roundRect(x, y, barWidth, barH, 4);
-        ctx.fill();
-      }
 
       animFrameRef.current = requestAnimationFrame(render);
     };
@@ -592,12 +783,12 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         cancelAnimationFrame(animFrameRef.current);
       }
     };
-  }, [callStatus, partnerName]);
+  }, [callStatus, hasRemoteStream, partnerName]);
 
-  // 12. Trigger Floating Reaction
+  // 14. Floating Reactions
   const triggerReaction = (emoji: string, broadcast = true) => {
     const id = `rx-${Date.now()}-${Math.random()}`;
-    const left = 20 + Math.random() * 60; // percentage
+    const left = 20 + Math.random() * 60;
     setReactions((prev) => [...prev, { id, emoji, left }]);
 
     setTimeout(() => {
@@ -616,7 +807,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     }
   };
 
-  // 13. Send In-Call Chat Message
+  // 15. In-Call Chat Message
   const handleSendInCallMessage = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!chatInput.trim()) return;
@@ -644,7 +835,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     }
   };
 
-  // 14. Run Code in Scratchpad
+  // 16. Run Code
   const handleRunCode = () => {
     setIsRunningCode(true);
     setCodeOutput(null);
@@ -657,7 +848,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           logs.push(args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
         };
 
-        // Safe eval for JavaScript
         if (codeLanguage === 'javascript') {
           // eslint-disable-next-line no-eval
           const result = eval(codeContent);
@@ -665,7 +855,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             logs.push(String(result));
           }
         } else {
-          logs.push(`[${codeLanguage.toUpperCase()} Runner Simulated Output]: Code compiled successfully without errors.\nOutput: Exchange Match Score: 88%`);
+          logs.push(`[${codeLanguage.toUpperCase()} Runner Simulated Output]: Code compiled successfully.\nOutput: Exchange Match Score: 88%`);
         }
 
         console.log = originalLog;
@@ -678,7 +868,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     }, 400);
   };
 
-  // 15. Export Notes to Chat
+  // 17. Export Notes
   const handleExportNotes = async () => {
     setIsSavingNotes(true);
     try {
@@ -692,31 +882,35 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     }
   };
 
-  // 16. Controls: Toggle Audio
+  // 18. Toggle Audio (Microphone)
   const toggleAudio = () => {
     if (cameraStreamRef.current) {
-      cameraStreamRef.current.getAudioTracks().forEach((t) => {
-        t.enabled = isAudioMuted;
+      const audioTracks = cameraStreamRef.current.getAudioTracks();
+      audioTracks.forEach((t) => {
+        t.enabled = isAudioMuted; // Toggle enabled state
       });
+      console.log(`[Media] Audio tracks enabled: ${isAudioMuted}`);
     }
     setIsAudioMuted(!isAudioMuted);
   };
 
-  // 17. Controls: Toggle Video
+  // 19. Toggle Video (Camera)
   const toggleVideo = () => {
     if (cameraStreamRef.current) {
-      cameraStreamRef.current.getVideoTracks().forEach((t) => {
-        t.enabled = isVideoMuted;
+      const videoTracks = cameraStreamRef.current.getVideoTracks();
+      videoTracks.forEach((t) => {
+        t.enabled = isVideoMuted; // Toggle enabled state
       });
+      console.log(`[Media] Video tracks enabled: ${isVideoMuted}`);
     }
     setIsVideoMuted(!isVideoMuted);
   };
 
-  // 18. Controls: Toggle Screen Share
+  // 20. Screen Share
   const toggleScreenShare = async () => {
     if (!isScreenSharing) {
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
         screenStreamRef.current = stream;
         const screenTrack = stream.getVideoTracks()[0];
 
@@ -726,10 +920,12 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         setIsScreenSharing(true);
 
         if (peerConnectionRef.current) {
-          const senders = peerConnectionRef.current.getSenders();
-          const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
-          if (videoSender) {
-            videoSender.replaceTrack(screenTrack);
+          const transceivers = peerConnectionRef.current.getTransceivers();
+          const videoTransceiver = transceivers.find(
+            (t) => t.receiver.track.kind === 'video' || t.sender.track?.kind === 'video'
+          );
+          if (videoTransceiver && videoTransceiver.sender) {
+            videoTransceiver.sender.replaceTrack(screenTrack);
           }
         }
 
@@ -755,16 +951,18 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       localVideoRef.current.srcObject = cameraStreamRef.current;
       const cameraTrack = cameraStreamRef.current.getVideoTracks()[0];
       if (peerConnectionRef.current && cameraTrack) {
-        const senders = peerConnectionRef.current.getSenders();
-        const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
-        if (videoSender) {
-          videoSender.replaceTrack(cameraTrack);
+        const transceivers = peerConnectionRef.current.getTransceivers();
+        const videoTransceiver = transceivers.find(
+          (t) => t.receiver.track.kind === 'video' || t.sender.track?.kind === 'video'
+        );
+        if (videoTransceiver && videoTransceiver.sender) {
+          videoTransceiver.sender.replaceTrack(cameraTrack);
         }
       }
     }
   };
 
-  // 19. Hangup / End Call
+  // 21. Hangup / End Call
   const handleHangup = async () => {
     try {
       await api.updateCallStatus(session.id, 'ENDED');
@@ -783,7 +981,18 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     onEndCall();
   };
 
-  // 20. Whiteboard drawing helpers
+  // 22. Unmute Remote Audio (in case browser blocked autoplay)
+  const handleEnableRemoteAudio = () => {
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.muted = false;
+      remoteVideoRef.current.volume = 1.0;
+      remoteVideoRef.current.play().then(() => {
+        setIsAudioAutoplayBlocked(false);
+      }).catch(() => {});
+    }
+  };
+
+  // Whiteboard drawing
   const handleWhiteboardMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = whiteboardCanvasRef.current;
     if (!canvas) return;
@@ -865,7 +1074,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   };
 
-  // Format Duration string MM:SS
   const formatTime = (secs: number) => {
     const mins = Math.floor(secs / 60);
     const rem = secs % 60;
@@ -875,7 +1083,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-2 sm:p-4 animate-in fade-in duration-200">
       <div className="bg-slate-900 border border-slate-800 text-white rounded-3xl w-full max-w-6xl h-[94vh] max-h-[880px] shadow-2xl flex flex-col overflow-hidden relative">
-        {/* Floating Reactions Container */}
+        {/* Floating Reactions */}
         <div className="absolute inset-0 pointer-events-none overflow-hidden z-40">
           {reactions.map((rx) => (
             <div
@@ -888,7 +1096,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           ))}
         </div>
 
-        {/* Top Header Navigation Bar */}
+        {/* Top Header */}
         <div className="px-4 sm:px-6 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/95 z-20 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-400 shrink-0">
@@ -911,7 +1119,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                       callStatus === 'CONNECTED' ? 'bg-emerald-400' : 'bg-amber-400 animate-ping'
                     }`}
                   />
-                  {callStatus === 'CONNECTED' ? 'Connected • Live' : 'Ringing...'}
+                  {callStatus === 'CONNECTED' ? 'Live Session' : 'Ringing...'}
                 </span>
               </div>
               <p className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
@@ -925,7 +1133,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             </div>
           </div>
 
-          {/* Tab Switcher in Header */}
+          {/* Tab Switcher */}
           <div className="flex items-center gap-1.5 bg-slate-950/80 p-1 rounded-2xl border border-slate-800">
             <button
               onClick={() => setActiveTab('video')}
@@ -977,7 +1185,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           </div>
         </div>
 
-        {/* Ringing / Auto-Connect Banner (Ensures solo user never gets stuck!) */}
+        {/* Ringing & Auto-Connect Banner */}
         {callStatus === 'CALLING' && (
           <div className="bg-gradient-to-r from-indigo-900/90 via-purple-900/90 to-indigo-950/90 px-6 py-3 border-b border-indigo-500/30 flex items-center justify-between z-20 shrink-0">
             <div className="flex items-center gap-3">
@@ -989,14 +1197,14 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   Calling {partnerName}...
                   {autoAnswerTimer > 0 ? (
                     <span className="text-indigo-300 font-normal">
-                      (Auto-answering in {autoAnswerTimer}s for solo testing)
+                      (Auto-connecting in {autoAnswerTimer}s)
                     </span>
                   ) : (
-                    <span className="text-emerald-300 font-normal">Connecting stream...</span>
+                    <span className="text-emerald-300 font-normal">Connecting live audio & video...</span>
                   )}
                 </p>
                 <p className="text-[11px] text-indigo-200">
-                  Click below to immediately connect the interactive live stream:
+                  Ready to talk? Click below to instantly connect streams:
                 </p>
               </div>
             </div>
@@ -1011,23 +1219,39 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           </div>
         )}
 
+        {/* Unmute Peer Audio Warning Banner if Browser Blocked Autoplay */}
+        {isAudioAutoplayBlocked && (
+          <div className="bg-amber-900/90 border-b border-amber-600 px-6 py-2.5 flex items-center justify-between z-20 shrink-0">
+            <div className="flex items-center gap-2 text-xs text-amber-100 font-medium">
+              <VolumeX className="w-4 h-4 text-amber-300 shrink-0" />
+              <span>Browser paused incoming audio for autoplay policy. Click button to unmute peer's voice.</span>
+            </div>
+            <button
+              onClick={handleEnableRemoteAudio}
+              className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-lg cursor-pointer flex items-center gap-1"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              <span>Unmute Audio</span>
+            </button>
+          </div>
+        )}
+
         {/* Main Content Area */}
         <div className="flex-1 relative bg-slate-950 overflow-hidden flex">
           {/* TAB 1: 1-to-1 Video Stream View */}
           {activeTab === 'video' && (
             <div className="flex-1 p-3 sm:p-5 grid grid-cols-1 md:grid-cols-2 gap-4 h-full max-h-[640px]">
-              {/* Remote Peer Screen (Rahul Sharma) */}
+              {/* REMOTE PEER SCREEN (Opponent Member) */}
               <div className="relative rounded-3xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col items-center justify-center shadow-inner group">
-                {/* Real Remote Video Element if WebRTC stream exists */}
+                {/* Real Remote Video Element (CRITICAL: NOT MUTED so peer voice can be heard!) */}
                 <video
                   ref={remoteVideoRef}
                   autoPlay
                   playsInline
-                  muted
                   className={`w-full h-full object-cover ${hasRemoteStream ? 'block' : 'hidden'}`}
                 />
 
-                {/* Animated Interactive Peer Canvas (active when simulated peer is connected) */}
+                {/* Simulated Peer Canvas (Only shown when waiting for real peer stream) */}
                 <canvas
                   ref={simulatedPeerCanvasRef}
                   width={640}
@@ -1037,7 +1261,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   }`}
                 />
 
-                {/* Calling / Ringing Placeholder when still in CALLING state */}
+                {/* Calling / Ringing Placeholder */}
                 {callStatus === 'CALLING' && (
                   <div className="text-center p-6 flex flex-col items-center animate-in fade-in">
                     <div className="relative mb-4">
@@ -1052,35 +1276,39 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                     </div>
                     <h4 className="text-base sm:text-lg font-bold text-slate-100">{partnerName}</h4>
                     <p className="text-xs text-indigo-300 mt-1 max-w-xs">
-                      Ringing partner... Click "Connect Now" to start testing instantly.
+                      Connecting call... Both participants will be able to talk and see video.
                     </p>
                     <button
                       onClick={handleConnectNow}
                       className="mt-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg cursor-pointer"
                     >
                       <UserCheck className="w-4 h-4" />
-                      <span>Instant Connect (Test Mode)</span>
+                      <span>Connect Now</span>
                     </button>
                   </div>
                 )}
 
-                {/* Partner Header Tag */}
+                {/* Partner Header Badge */}
                 <div className="absolute top-3 left-3 px-3 py-1 bg-slate-900/85 backdrop-blur-md rounded-xl text-xs font-medium text-slate-200 border border-slate-700/60 flex items-center gap-2">
                   <span
                     className={`w-2 h-2 rounded-full ${
-                      callStatus === 'CONNECTED' ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'
+                      hasRemoteStream
+                        ? 'bg-emerald-400'
+                        : callStatus === 'CONNECTED'
+                        ? 'bg-indigo-400 animate-pulse'
+                        : 'bg-amber-400 animate-pulse'
                     }`}
                   />
                   <span>{partnerName}</span>
                   <span className="text-[10px] text-slate-400">
-                    {callStatus === 'CONNECTED' ? '(Remote HD)' : '(Calling)'}
+                    {hasRemoteStream ? '(Live Camera & Mic)' : callStatus === 'CONNECTED' ? '(Connecting P2P)' : '(Calling)'}
                   </span>
                 </div>
               </div>
 
-              {/* Local User Screen (Sarah Chen / You) */}
+              {/* LOCAL USER SCREEN (You) */}
               <div className="relative rounded-3xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col items-center justify-center shadow-inner group">
-                {/* Real User Webcam Video Element */}
+                {/* Local Video Element (MUTED to prevent hearing your own microphone back as an echo) */}
                 <video
                   ref={localVideoRef}
                   autoPlay
@@ -1091,23 +1319,29 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   }`}
                 />
 
-                {/* Virtual Camera / Avatar Fallback (when camera permission blocked or muted) */}
+                {/* Fallback Virtual Camera Avatar (when camera is off, muted, or permission blocked) */}
                 {(useVirtualCam || isVideoMuted || mediaError) && (
                   <div className="relative w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-950/40 to-slate-900 p-6 text-center">
                     <div className="relative mb-3">
                       <img
                         src={currentUser.profileImage}
                         alt={currentUser.name}
-                        className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover ring-4 ring-indigo-500/50 shadow-2xl"
+                        className={`w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover ring-4 shadow-2xl transition-all ${
+                          isLocalSpeaking ? 'ring-emerald-400 scale-105' : 'ring-indigo-500/50'
+                        }`}
                       />
-                      <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-emerald-500 ring-4 ring-slate-900 flex items-center justify-center">
-                        <Mic className="w-3.5 h-3.5 text-white" />
+                      <div
+                        className={`absolute -bottom-1 -right-1 w-6 h-6 rounded-full ring-4 ring-slate-900 flex items-center justify-center ${
+                          isAudioMuted ? 'bg-rose-500' : 'bg-emerald-500'
+                        }`}
+                      >
+                        {isAudioMuted ? <MicOff className="w-3.5 h-3.5 text-white" /> : <Mic className="w-3.5 h-3.5 text-white" />}
                       </div>
                     </div>
 
                     <h4 className="text-base font-bold text-slate-200">{currentUser.name} (You)</h4>
                     <span className="mt-1 px-2.5 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-full text-[10px] font-semibold">
-                      {isVideoMuted ? 'Camera Muted' : 'Virtual HD Camera • Mic Active'}
+                      {isVideoMuted ? 'Camera Muted' : isAudioMuted ? 'Microphone Muted' : 'Virtual HD Feed • Microphone Active'}
                     </span>
 
                     <button
@@ -1115,16 +1349,17 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                       className="mt-4 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors border border-slate-700 cursor-pointer"
                     >
                       <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Request Real Webcam</span>
+                      <span>Request Camera & Mic Access</span>
                     </button>
                   </div>
                 )}
 
                 {/* Local Participant Tag */}
                 <div className="absolute top-3 left-3 px-3 py-1 bg-slate-900/85 backdrop-blur-md rounded-xl text-xs font-medium text-slate-200 border border-slate-700/60 flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-indigo-400" />
+                  <span className={`w-2 h-2 rounded-full ${isLocalSpeaking ? 'bg-emerald-400 animate-ping' : 'bg-indigo-400'}`} />
                   <span>{currentUser.name} (You)</span>
-                  {isScreenSharing && <span className="text-emerald-400 text-[10px]">• Sharing</span>}
+                  {isLocalSpeaking && <span className="text-emerald-400 text-[10px] font-bold">● Speaking</span>}
+                  {isScreenSharing && <span className="text-emerald-400 text-[10px]">• Sharing Screen</span>}
                 </div>
 
                 {isAudioMuted && (
@@ -1174,7 +1409,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               </div>
 
               <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-3 pt-3 overflow-hidden">
-                {/* Code Editor */}
                 <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col">
                   <textarea
                     value={codeContent}
@@ -1184,9 +1418,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   />
                 </div>
 
-                {/* Output Console & Partner Mini Video */}
                 <div className="flex flex-col gap-3">
-                  {/* Console Output */}
                   <div className="flex-1 bg-slate-900 border border-slate-800 rounded-2xl p-3 flex flex-col overflow-hidden">
                     <span className="text-[11px] font-bold text-slate-400 font-mono uppercase pb-2 border-b border-slate-800 mb-2">
                       Terminal Output
@@ -1196,7 +1428,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                     </pre>
                   </div>
 
-                  {/* Picture-in-picture peer video */}
                   <div className="h-36 bg-slate-900 border border-slate-800 rounded-2xl relative overflow-hidden flex items-center justify-center">
                     <div className="text-center p-3">
                       <img
@@ -1205,7 +1436,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                         className="w-12 h-12 rounded-full mx-auto object-cover ring-2 ring-indigo-500/50 mb-1"
                       />
                       <span className="text-xs font-bold text-slate-200 block">{partnerName}</span>
-                      <span className="text-[10px] text-emerald-400 font-medium">● Watching Code</span>
+                      <span className="text-[10px] text-emerald-400 font-medium">● Audio Live</span>
                     </div>
                   </div>
                 </div>
@@ -1213,10 +1444,9 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             </div>
           )}
 
-          {/* TAB 3: Interactive Whiteboard */}
+          {/* TAB 3: Whiteboard */}
           {activeTab === 'whiteboard' && (
             <div className="flex-1 p-4 flex flex-col h-full bg-slate-950">
-              {/* Whiteboard Toolbar */}
               <div className="flex items-center justify-between pb-3 border-b border-slate-800 flex-wrap gap-2">
                 <div className="flex items-center gap-2">
                   <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800">
@@ -1258,7 +1488,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                     </button>
                   </div>
 
-                  {/* Colors */}
                   <div className="flex items-center gap-1.5 bg-slate-900 p-1.5 rounded-xl border border-slate-800">
                     {['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#a855f7', '#ffffff'].map((c) => (
                       <button
@@ -1272,7 +1501,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                     ))}
                   </div>
 
-                  {/* Width */}
                   <div className="flex items-center gap-1.5 text-xs text-slate-400 pl-2">
                     <span>Width:</span>
                     <input
@@ -1295,7 +1523,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                 </button>
               </div>
 
-              {/* Canvas Surface */}
               <div className="flex-1 pt-3 flex items-center justify-center">
                 <canvas
                   ref={whiteboardCanvasRef}
@@ -1345,7 +1572,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             </div>
           )}
 
-          {/* Collapsible In-Call Chat Sidebar */}
+          {/* In-Call Chat Sidebar */}
           {isChatOpen && (
             <div className="w-80 border-l border-slate-800 bg-slate-900/95 flex flex-col h-full z-30 animate-in slide-in-from-right duration-200">
               <div className="p-3 border-b border-slate-800 flex items-center justify-between">
@@ -1403,7 +1630,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
         {/* Bottom Control Bar */}
         <div className="px-4 sm:px-6 py-3.5 bg-slate-900 border-t border-slate-800 flex items-center justify-between shrink-0 z-20">
-          {/* Reaction Emojis Bar */}
+          {/* Reaction Emojis */}
           <div className="hidden sm:flex items-center gap-1.5">
             {[
               { icon: '👏', label: 'Clap' },
@@ -1423,7 +1650,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             ))}
           </div>
 
-          {/* Primary Call Controls */}
+          {/* Primary Controls */}
           <div className="flex items-center gap-2.5 sm:gap-3 mx-auto sm:mx-0">
             {/* Mic Toggle */}
             <button
@@ -1433,7 +1660,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40 hover:bg-rose-500/30'
                   : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'
               }`}
-              title={isAudioMuted ? 'Unmute Mic' : 'Mute Mic'}
+              title={isAudioMuted ? 'Unmute Microphone' : 'Mute Microphone'}
             >
               {isAudioMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
             </button>
@@ -1464,7 +1691,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               <Monitor className="w-5 h-5" />
             </button>
 
-            {/* Toggle In-Call Chat Drawer */}
+            {/* In-Call Chat */}
             <button
               onClick={() => setIsChatOpen(!isChatOpen)}
               className={`w-11 h-11 rounded-2xl flex items-center justify-center transition-all cursor-pointer ${
@@ -1477,7 +1704,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               <MessageSquare className="w-5 h-5" />
             </button>
 
-            {/* End Call Button */}
+            {/* End Call */}
             <button
               onClick={handleHangup}
               className="px-5 h-11 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg shadow-rose-900/30 transition-all cursor-pointer hover:scale-102"
@@ -1488,7 +1715,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             </button>
           </div>
 
-          {/* Quick Connect / Simulation button if still calling */}
+          {/* Quick Connect / Simulation button */}
           <div className="hidden sm:flex items-center gap-2">
             {callStatus === 'CALLING' ? (
               <button
@@ -1496,7 +1723,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                 className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-sm flex items-center gap-1.5 cursor-pointer animate-pulse"
               >
                 <UserCheck className="w-3.5 h-3.5" />
-                <span>Answer Now</span>
+                <span>Connect</span>
               </button>
             ) : (
               <span className="text-xs text-slate-400 font-mono">
@@ -1509,4 +1736,3 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     </div>
   );
 };
-
