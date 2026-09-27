@@ -15,6 +15,7 @@ import {
   Edit3
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../components/Toast';
 import { api } from '../services/api';
 import { SkillExchangeRequest, Connection } from '../types';
 
@@ -30,6 +31,7 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
   onOpenAuthModal,
 }) => {
   const { currentUser, isAuthenticated } = useAuth();
+  const { showToast } = useToast();
 
   const [exchanges, setExchanges] = useState<SkillExchangeRequest[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -74,20 +76,21 @@ export const ExplorePage: React.FC<ExplorePageProps> = ({
     try {
       const newConn = await api.createConnection(receiverId);
       setConnections(prev => [newConn, ...(Array.isArray(prev) ? prev : [])]);
+      showToast('Connection request sent!', 'success');
     } catch (err: any) {
-      alert(err.message || 'Failed to send connection request');
+      showToast(err.message || 'Failed to send connection request', 'error');
     } finally {
       setConnectingUserId(null);
     }
   };
 
   const handleDeleteExchange = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this exchange request?')) return;
     try {
       await api.deleteExchange(id);
       setExchanges(prev => (Array.isArray(prev) ? prev : []).filter(e => e.id !== id));
+      showToast('Exchange request deleted', 'info');
     } catch (err: any) {
-      alert(err.message || 'Failed to delete exchange request');
+      showToast(err.message || 'Failed to delete exchange request', 'error');
     }
   };
 
