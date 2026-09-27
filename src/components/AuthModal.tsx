@@ -67,7 +67,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
     } else {
       if (!email.trim() || !password) {
-        setError('Please enter your email and password.');
+        setError('Please enter your email or username ID and password.');
         return;
       }
 
@@ -77,7 +77,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         onClose();
         if (onSuccess) onSuccess();
       } catch (err: any) {
-        setError(err.message || 'Invalid email or password.');
+        setError(err.message || 'Invalid email/username or password.');
       } finally {
         setIsSubmitting(false);
       }
@@ -156,16 +156,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Email Address
+              {mode === 'login' ? 'Email Address or Username ID' : 'Email Address'}
             </label>
             <div className="relative">
               <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
               <input
-                type="email"
+                id="auth-identifier-input"
+                type={mode === 'login' ? 'text' : 'email'}
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@example.com"
+                placeholder={mode === 'login' ? 'name@example.com or your username' : 'name@example.com'}
                 className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
               />
             </div>
@@ -276,7 +277,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <p className="text-[11px] text-slate-500 mb-2.5">
             Click any profile to test peer-to-peer match exchanges:
           </p>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => handleQuickLogin('saikatpaul2820@gmail.com')}
+              className="px-2.5 py-1.5 text-xs bg-indigo-50/60 border border-indigo-200 hover:border-indigo-400 hover:bg-indigo-100/60 rounded-lg text-left transition-colors"
+            >
+              <span className="font-semibold text-indigo-900 block text-[11px]">Saikat Paul ⭐</span>
+              <span className="text-[10px] text-indigo-600">React ↔ Python</span>
+            </button>
             <button
               type="button"
               onClick={() => handleQuickLogin('sarah@skillswap.io')}
@@ -308,6 +317,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             >
               <span className="font-semibold text-slate-800 block text-[11px]">Marcus Brody</span>
               <span className="text-[10px] text-slate-500">Video ↔ Python</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleQuickLogin('priya@skillswap.io')}
+              className="px-2.5 py-1.5 text-xs bg-white border border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/50 rounded-lg text-left transition-colors"
+            >
+              <span className="font-semibold text-slate-800 block text-[11px]">Priya Patel</span>
+              <span className="text-[10px] text-slate-500">Marketing ↔ Excel</span>
             </button>
           </div>
         </div>
